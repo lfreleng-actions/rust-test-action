@@ -182,6 +182,174 @@ jobs:
           echo "Coverage: ${COVERAGE_PERCENT:-none}"
           exit "$failed"
 
+  ### Toolchain components and targets on a real rustup ###
+  toolchain-extras:
+    name: "Toolchain components and targets"
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      # yamllint disable-line rule:line-length
+      - uses: lfreleng-actions/harden-runner-block-action@a32eb064a1188f6b0f15d2c0c0381efe54b0dd22  # v0.12.2
+        with:
+          config: '@538904e241556d101fb908b50e2a2965fa0346cf'  # v0.16.6
+
+      - name: "Harden runner (block)"
+        # yamllint disable-line rule:line-length
+        uses: step-security/harden-runner@351661ca32ac09a36dc5ee2d536e3128f2a3c8ed  # v2.22.0
+        with:
+          egress-policy: "block"
+          allowed-endpoints: >
+            ${{ env.CONNECTION_ALLOW_LIST }}
+
+      - name: "Checkout repository"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: "Checkout test-rust-project"
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: lfreleng-actions/test-rust-project
+          ref: "5db6f8f6624e676d1d76f8db02a0253fee39900c"  # v0.0.1
+          path: fixture
+          persist-credentials: false
+
+      # Old releases the runner image does not carry. With auto-install
+      # off, only the action's own 'rustup toolchain install' can
+      # provide them.
+      - name: "Show the toolchains on the runner"
+        shell: bash
+        run: rustup --version && rustup toolchain list
+
+      - name: "Exact toolchain with a component and a target"
+        id: extras
+        uses: $/
+        env:
+          RUSTUP_AUTO_INSTALL: "0"
+        with:
+          path_prefix: fixture
+          toolchain: "1.90.0"
+          toolchain_components: "clippy"
+          toolchain_targets: "wasm32-unknown-unknown"
+          lockfile_required: "true"
+          artefact_upload: "false"
+
+      - name: "Missing toolchain named alone"
+        id: alone
+        uses: $/
+        env:
+          RUSTUP_AUTO_INSTALL: "0"
+        with:
+          path_prefix: fixture
+          toolchain: "1.89.0"
+          artefact_upload: "false"
+
+      # 'rustup toolchain install' rejects a linked toolchain's name, so
+      # this passes only when the action finds it present and skips the
+      # install.
+      - name: "Link 1.90.0 as a custom toolchain"
+        shell: bash
+        run: |
+          # Link 1.90.0 as a custom toolchain
+          set -euo pipefail
+          sysroot="$(rustup run 1.90.0 rustc --print sysroot)"
+          rustup toolchain link linked-1.90 "$sysroot"
+
+      - name: "Linked toolchain named alone"
+        id: linked
+        uses: $/
+        env:
+          RUSTUP_AUTO_INSTALL: "0"
+        with:
+          path_prefix: fixture
+          toolchain: "linked-1.90"
+          artefact_upload: "false"
+
+      - name: "Invalid component name"
+        id: bad-component
+        continue-on-error: true
+        uses: $/
+        with:
+          path_prefix: fixture
+          toolchain: "1.90.0"
+          toolchain_components: "clippy;rustfmt"
+          artefact_upload: "false"
+
+      - name: "Component rustup cannot supply"
+        id: missing-component
+        continue-on-error: true
+        uses: $/
+        with:
+          path_prefix: fixture
+          toolchain: "1.90.0"
+          toolchain_components: "no-such-component"
+          artefact_upload: "false"
+
+      - name: "Verify the installed components and targets"
+        shell: bash
+        env:
+          TOOLCHAIN: ${{ steps.extras.outputs.toolchain }}
+          TOOLCHAIN_KIND: ${{ steps.extras.outputs.toolchain_kind }}
+          RUSTC_VERSION: ${{ steps.extras.outputs.rustc_version }}
+          TESTS_OUTCOME: ${{ steps.extras.outputs.tests_outcome }}
+          ALONE_RUSTC: ${{ steps.alone.outputs.rustc_version }}
+          ALONE_TESTS: ${{ steps.alone.outputs.tests_outcome }}
+          LINKED_TOOLCHAIN: ${{ steps.linked.outputs.toolchain }}
+          LINKED_RUSTC: ${{ steps.linked.outputs.rustc_version }}
+          LINKED_TESTS: ${{ steps.linked.outputs.tests_outcome }}
+          BAD_COMPONENT: ${{ steps.bad-component.outcome }}
+          MISSING_COMPONENT: ${{ steps.missing-component.outcome }}
+          MISSING_TESTS: ${{ steps.missing-component.outputs.tests_outcome }}
+        run: |
+          # Verify the installed components and targets
+          set -uo pipefail
+          failed=0
+          fail() {
+            echo "::error::$*"
+            failed=1
+          }
+          [ "$TOOLCHAIN" = "1.90.0" ] || fail "toolchain is not 1.90.0"
+          [ "$TOOLCHAIN_KIND" = channel ] \
+            || fail "toolchain_kind is not channel"
+          [ "$RUSTC_VERSION" = "1.90.0" ] || fail "rustc_version is not 1.90.0"
+          [ "$TESTS_OUTCOME" = passed ] || fail "the tests did not pass"
+          components="$(rustup component list --installed --toolchain 1.90.0)"
+          targets="$(rustup target list --installed --toolchain 1.90.0)"
+          printf 'Components:\n%s\nTargets:\n%s\n' "$components" "$targets"
+          grep -q '^clippy-' <<< "$components" || fail "clippy is not installed"
+          grep -qx 'rust-std-wasm32-unknown-unknown' <<< "$components" \
+            || fail "the wasm32 standard library is not installed"
+          grep -qx 'wasm32-unknown-unknown' <<< "$targets" \
+            || fail "the wasm32 target is not installed"
+          # The minimal profile leaves out the documentation.
+          if grep -q '^rust-docs' <<< "$components"; then
+            fail "the toolchain was not installed with the minimal profile"
+          fi
+          [ "$ALONE_RUSTC" = "1.89.0" ] || fail "rustc_version is not 1.89.0"
+          [ "$ALONE_TESTS" = passed ] \
+            || fail "the tests did not pass on 1.89.0"
+          # The minimal profile, not the default that auto-install uses.
+          alone="$(rustup component list --installed --toolchain 1.89.0)"
+          printf 'Components of 1.89.0:\n%s\n' "$alone"
+          if grep -Eq '^(rust-docs|clippy|rustfmt)-' <<< "$alone"; then
+            fail "1.89.0 holds more than the minimal profile"
+          fi
+          [ "$LINKED_TOOLCHAIN" = linked-1.90 ] \
+            || fail "toolchain is not linked-1.90"
+          [ "$LINKED_RUSTC" = "1.90.0" ] \
+            || fail "the linked toolchain did not report rustc 1.90.0"
+          [ "$LINKED_TESTS" = passed ] \
+            || fail "the tests did not pass on the linked toolchain"
+          [ "$BAD_COMPONENT" = failure ] \
+            || fail "an invalid component name did not fail"
+          [ "$MISSING_COMPONENT" = failure ] \
+            || fail "a component rustup cannot supply did not fail"
+          [ "$MISSING_TESTS" = failed ] \
+            || fail "a failed install did not report failed tests"
+          exit "$failed"
+
   ### Download uploaded artefacts and check their contents ###
   check-artefact:
     name: "Check uploaded reports"

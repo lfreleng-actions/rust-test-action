@@ -9,8 +9,8 @@
 # Inputs arrive as INPUT_* environment variables (see action.yaml).
 # Stages run in order:
 #
-#   Check inputs -> Check toolchain -> Run setup script
-#   -> Check lockfile -> Prepare coverage -> Prepare reports -> Run tests
+#   Check inputs -> Check toolchain -> Install toolchain
+#   -> Run setup script -> Check lockfile -> Prepare coverage -> Prepare reports -> Run tests
 #   -> Run doc tests -> Write coverage reports -> Collect JUnit report
 #
 # A failing test or doc test run does not stop the later stages, so the
@@ -49,6 +49,8 @@ junit_path=""
 lcov_path=""
 cobertura_path=""
 lockfile_cell="⏸️ Not reached"
+# Set only when toolchain_components or toolchain_targets name any.
+install_cell=""
 setup_cell="⏸️ Not reached"
 tests_cell="⏸️ Not reached"
 doc_cell="⏸️ Not reached"
@@ -127,6 +129,9 @@ render_summary() {
       add_row "Toolchain" "No rustup: cargo $(md_text "${cargo_version:-unknown}")"
       ;;
   esac
+  if [ -n "$install_cell" ]; then
+    add_row "Components and targets" "$install_cell"
+  fi
   if [ -n "${setup_abs:-}" ]; then
     add_row "Setup script" "$setup_cell"
   fi
@@ -215,6 +220,12 @@ run_logged() {
   run_status=0
   in_project "$@" 2>&1 | tee "$work_dir/run.log" || run_status=$?
   echo "::endgroup::"
+}
+
+# Print the arguments joined by commas, as rustup lists take them.
+join_commas() {
+  local IFS=,
+  printf '%s' "$*"
 }
 
 # Set variable $2 to the version in the 'TOOL X.Y.Z (...)' line that
@@ -347,6 +358,81 @@ else
 fi
 set_output toolchain "$toolchain"
 set_output toolchain_kind "$toolchain_kind"
+
+### Install toolchain ###
+
+# A toolchain input makes rustup ignore rust-toolchain.toml, and with
+# it the components and targets that file lists; the caller passes
+# those through toolchain_components and toolchain_targets. One 'rustup
+# toolchain install' installs a missing toolchain with the minimal
+# profile, or adds them to the installed one, keeping an exact version
+# such as 1.90.0 as it is (a moving channel such as stable updates).
+# A channel named by the toolchain input alone is installed only when
+# missing, rather than left to rustup's auto-install, which installs
+# the default profile and which RUSTUP_AUTO_INSTALL=0 turns off. The
+# probe leaves an installed channel as it is, and keeps a toolchain
+# from 'rustup toolchain link', which install rejects, working. The
+# same rules as rust-build-action.
+stage="Install toolchain"
+extras=()
+if [ "${#component_list[@]}" -gt 0 ]; then
+  extras+=("components $(md_code "${component_list[*]}")")
+fi
+if [ "${#target_list[@]}" -gt 0 ]; then
+  extras+=("targets $(md_code "${target_list[*]}")")
+fi
+if [ "${#extras[@]}" -gt 0 ]; then
+  install_cell="⏸️ Not reached"
+fi
+case "$toolchain_kind" in
+  channel)
+    install="${#extras[@]}"
+    if [ "$install" -eq 0 ] && [ -n "$toolchain_input" ] \
+      && ! in_project env RUSTUP_AUTO_INSTALL=0 \
+        rustup which --toolchain "$toolchain_pin" rustc > /dev/null 2>&1; then
+      install=1
+    fi
+    if [ "$install" -gt 0 ]; then
+      install_args=(toolchain install "$toolchain_pin" --profile minimal
+        --no-self-update)
+      if [ "${#component_list[@]}" -gt 0 ]; then
+        install_args+=(--component "$(join_commas "${component_list[@]}")")
+      fi
+      if [ "${#target_list[@]}" -gt 0 ]; then
+        install_args+=(--target "$(join_commas "${target_list[@]}")")
+      fi
+      echo "::group::Install toolchain $toolchain_pin"
+      echo "Running: rustup ${install_args[*]}"
+      install_status=0
+      in_project rustup "${install_args[@]}" || install_status=$?
+      echo "::endgroup::"
+      if [ "$install_status" -ne 0 ]; then
+        if [ "${#extras[@]}" -eq 0 ]; then
+          fail "rustup could not install toolchain $toolchain_pin"
+        fi
+        install_cell="❌ rustup could not install them"
+        fail "rustup could not install toolchain $toolchain_pin with the" \
+          "requested toolchain_components and toolchain_targets"
+      fi
+      if [ "${#extras[@]}" -gt 0 ]; then
+        install_cell="✅ ${extras[0]}${extras[1]+, ${extras[1]}}"
+      fi
+    fi
+    ;;
+  path)
+    if [ "${#extras[@]}" -gt 0 ]; then
+      install_cell="⚠️ Ignored for a path toolchain"
+      warn "toolchain_components and toolchain_targets are ignored for a" \
+        "path toolchain; install them into that toolchain instead"
+    fi
+    ;;
+  none)
+    if [ "${#extras[@]}" -gt 0 ]; then
+      install_cell="❌ Needs rustup"
+      fail "toolchain_components and toolchain_targets need rustup on PATH"
+    fi
+    ;;
+esac
 
 read_version cargo cargo_version
 read_version rustc rustc_version

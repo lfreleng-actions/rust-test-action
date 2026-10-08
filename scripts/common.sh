@@ -123,6 +123,20 @@ split_names() {
   done
 }
 
+# Split $1 on whitespace and commas into the global array 'words',
+# failing with message $2 unless every word is a rustup component name
+# or target triple. The same rules and messages as rust-build-action.
+split_rustup_names() {
+  local word
+  words=()
+  IFS=$' \t\n' read -r -d '' -a words <<< "${1//[$'\r,']/ }" || true
+  for word in ${words[@]+"${words[@]}"}; do
+    if [[ ! "$word" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*$ ]]; then
+      fail "$2"
+    fi
+  done
+}
+
 require_relative_path() {
   case "$2" in
     *[[:cntrl:]]*) fail "$1 must not contain control characters" ;;
@@ -228,6 +242,12 @@ check_inputs() {
     && [[ ! "$toolchain_input" =~ ^[A-Za-z0-9._+-]+$ ]]; then
     fail "toolchain may contain only: A-Z a-z 0-9 . _ + -"
   fi
+  split_rustup_names "${INPUT_TOOLCHAIN_COMPONENTS:-}" \
+    "toolchain_components must list rustup component names"
+  component_list=(${words[@]+"${words[@]}"})
+  split_rustup_names "${INPUT_TOOLCHAIN_TARGETS:-}" \
+    "toolchain_targets must list target triples"
+  target_list=(${words[@]+"${words[@]}"})
 
   if [[ ! "$artefact_name" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,99}$ ]]; then
     fail "artefact_name may contain only: A-Z a-z 0-9 . _ -" \

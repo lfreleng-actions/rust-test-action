@@ -47,10 +47,12 @@ setup() {
   export MOCK_ENV_LOG="$workdir/cargo env"
   export MOCK_ARGS="$workdir/test args"
   export MOCK_RUSTUP_LOG="$workdir/rustup calls"
+  export MOCK_RUSTUP_ARGV="$workdir/rustup argv"
   export MOCK_CRED_LOG="$workdir/credentials"
   unset INPUT_MANIFEST_PATH INPUT_WORKSPACE INPUT_PACKAGES INPUT_EXCLUDE
   unset INPUT_FEATURES INPUT_ALL_FEATURES INPUT_NO_DEFAULT_FEATURES
   unset INPUT_TOOLCHAIN INPUT_LOCKFILE_REQUIRED INPUT_SETUP_SCRIPT
+  unset INPUT_TOOLCHAIN_COMPONENTS INPUT_TOOLCHAIN_TARGETS
   unset INPUT_TEST_RUNNER INPUT_NEXTEST_VERSION INPUT_TEST_ARGS
   unset INPUT_DOC_TESTS INPUT_COVERAGE INPUT_LLVM_COV_VERSION INPUT_JUNIT
   unset INPUT_ARTEFACT_UPLOAD INPUT_ARTEFACT_NAME INPUT_ARTEFACT_PATH
@@ -59,7 +61,8 @@ setup() {
   unset MOCK_FAIL_STAGE MOCK_TEST_EXIT MOCK_DOC_EXIT MOCK_DOC_NO_LIB
   unset MOCK_NO_JUNIT MOCK_LCOV MOCK_ROOT_MANIFEST MOCK_TOOLCHAIN
   unset MOCK_TOOLCHAIN_REASON MOCK_TREE MOCK_TEST_HOOK
-  unset MOCK_RUSTUP_FAIL MOCK_COMPONENT_FAIL MOCK_CARGO_VERSION
+  unset MOCK_RUSTUP_FAIL MOCK_COMPONENT_FAIL MOCK_INSTALL_FAIL MOCK_MISSING
+  unset MOCK_CARGO_VERSION
   unset MOCK_RUSTC_VERSION MOCK_RUSTC_FAIL MOCK_RUSTC_LINE RUSTUP_TOOLCHAIN
   unset CARGO_REGISTRY_TOKEN CARGO_REGISTRIES_CRATES_IO_TOKEN
   unset CARGO_REGISTRIES_PRIVATE_TOKEN CARGO_REGISTRIES_PRIVATE_INDEX
@@ -67,7 +70,8 @@ setup() {
   unset ACTIONS_RUNTIME_TOKEN GITHUB_ENV GITHUB_PATH GITHUB_STATE
   local file
   for file in "$GITHUB_OUTPUT" "$GITHUB_STEP_SUMMARY" "$MOCK_CALLS" \
-    "$MOCK_ENV_LOG" "$MOCK_ARGS" "$MOCK_RUSTUP_LOG" "$MOCK_CRED_LOG"; do
+    "$MOCK_ENV_LOG" "$MOCK_ARGS" "$MOCK_RUSTUP_LOG" "$MOCK_RUSTUP_ARGV" \
+    "$MOCK_CRED_LOG"; do
     : > "$file"
   done
 }
@@ -191,10 +195,31 @@ select_line() {
   run_action
 
   [ "$status" -eq 0 ]
-  [ ! -s "$MOCK_RUSTUP_LOG" ]
+  # Installed already: probed without auto-install, from the project
+  # directory, never reinstalled nor named through rustup show.
+  [ "$(cat "$MOCK_RUSTUP_ARGV")" = '<which><--toolchain><1.85.0><rustc>' ]
+  [ "$(cut -d'|' -f1,2 "$MOCK_RUSTUP_LOG")" = "$project|1.85.0" ]
   [ "$(output_value toolchain)" = 1.85.0 ]
   [ "$(output_value toolchain_kind)" = channel ]
   [ "$(cut -d'|' -f3 "$MOCK_ENV_LOG" | sort -u)" = 1.85.0 ]
+  # Nothing requested, so no row for components and targets.
+  run ! grep -q 'Components and targets' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "installs a toolchain named by the input only when it is missing" {
+  export INPUT_TOOLCHAIN=1.85.0 MOCK_MISSING=1.85.0
+  run_action
+
+  [ "$status" -eq 0 ]
+  [ "$(cat "$MOCK_RUSTUP_ARGV")" = "$(printf '%s\n' \
+    '<which><--toolchain><1.85.0><rustc>' \
+    '<toolchain><install><1.85.0><--profile><minimal><--no-self-update>')" ]
+  # Both run before every cargo call.
+  [ "$(head -n2 "$MOCK_CRED_LOG" | cut -d' ' -f1-3)" \
+    = "$(printf '%s\n' 'rustup which --toolchain' 'rustup toolchain install')" ]
+  [ "$(output_value toolchain_kind)" = channel ]
+  [ "$(cut -d'|' -f3 "$MOCK_ENV_LOG" | sort -u)" = 1.85.0 ]
+  run ! grep -q 'Components and targets' "$GITHUB_STEP_SUMMARY"
 }
 
 @test "a path toolchain runs unpinned with a warning" {
@@ -341,6 +366,182 @@ select_line() {
   [[ "$output" == *"rustc --version failed for the selected toolchain"* ]]
   [ "$(output_value rustc_version)" = "" ]
   [ -z "$(stage_calls test)" ]
+}
+
+### Toolchain components and targets ###
+
+# The rustup calls other than 'show active-toolchain'.
+install_calls() {
+  grep -vxF '<show><active-toolchain>' "$MOCK_RUSTUP_ARGV" || true
+}
+
+@test "installs components and targets in one rustup call" {
+  export INPUT_TOOLCHAIN=1.90.0 INPUT_TOOLCHAIN_COMPONENTS='clippy rust-src'
+  export INPUT_TOOLCHAIN_TARGETS=wasm32-unknown-unknown
+  run_action
+
+  [ "$status" -eq 0 ]
+  # A list named anything, so no probe: the one install call alone.
+  [ "$(install_calls)" = "$(printf '%s' '<toolchain><install><1.90.0>' \
+    '<--profile><minimal><--no-self-update>' \
+    '<--component><clippy,rust-src><--target><wasm32-unknown-unknown>')" ]
+  # The install comes before every cargo call, in the project directory.
+  [ "$(head -n1 "$MOCK_CRED_LOG" | cut -d'|' -f1)" \
+    = 'rustup toolchain install 1.90.0 --profile minimal --no-self-update --component clippy,rust-src --target wasm32-unknown-unknown' ]
+  [ "$(cut -d'|' -f1,2 "$MOCK_RUSTUP_LOG")" = "$project|1.90.0" ]
+  summary | grep -qF '| Components and targets | ✅ components <code>clippy rust-src</code>, targets <code>wasm32-unknown-unknown</code> |'
+}
+
+@test "splits components and targets on commas and whitespace" {
+  export INPUT_TOOLCHAIN_COMPONENTS=$'clippy,rustfmt\r\n rust-src\t, llvm-tools-preview'
+  export INPUT_TOOLCHAIN_TARGETS=' x86_64-unknown-linux-musl,,aarch64-unknown-linux-gnu '
+  run_action
+
+  [ "$status" -eq 0 ]
+  [ "$(install_calls)" = "$(printf '%s' \
+    '<toolchain><install><stable-x86_64-unknown-linux-gnu>' \
+    '<--profile><minimal><--no-self-update>' \
+    '<--component><clippy,rustfmt,rust-src,llvm-tools-preview>' \
+    '<--target><x86_64-unknown-linux-musl,aarch64-unknown-linux-gnu>')" ]
+}
+
+@test "passes only the lists that name anything" {
+  export INPUT_TOOLCHAIN_TARGETS=thumbv7em-none-eabihf
+  run_action
+  [ "$status" -eq 0 ]
+  [ "$(install_calls)" = "$(printf '%s' \
+    '<toolchain><install><stable-x86_64-unknown-linux-gnu>' \
+    '<--profile><minimal><--no-self-update><--target><thumbv7em-none-eabihf>')" ]
+  summary | grep -qF '| Components and targets | ✅ targets <code>thumbv7em-none-eabihf</code> |'
+
+  setup
+  export INPUT_TOOLCHAIN_COMPONENTS=' , clippy '
+  run_action
+  [ "$status" -eq 0 ]
+  [ "$(install_calls)" = "$(printf '%s' \
+    '<toolchain><install><stable-x86_64-unknown-linux-gnu>' \
+    '<--profile><minimal><--no-self-update><--component><clippy>')" ]
+  summary | grep -qF '| Components and targets | ✅ components <code>clippy</code> |'
+}
+
+@test "leaves a project's channel alone when nothing is requested" {
+  export INPUT_TOOLCHAIN_COMPONENTS=' , ' INPUT_TOOLCHAIN_TARGETS=$'\n'
+  run_action
+
+  [ "$status" -eq 0 ]
+  [ -z "$(install_calls)" ]
+  run ! grep -q 'Components and targets' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "fails when rustup cannot install the toolchain" {
+  export INPUT_TOOLCHAIN=1.90.0 INPUT_TOOLCHAIN_COMPONENTS=clippy
+  export MOCK_INSTALL_FAIL=true
+  run_action
+
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"::error::rustup could not install toolchain 1.90.0 with the requested toolchain_components and toolchain_targets"* ]]
+  [ ! -s "$MOCK_CALLS" ]
+  [ "$(output_value cargo_version)" = "" ]
+  summary | grep -qF '### ❌ Failed at Install toolchain'
+  summary | grep -qF '| Components and targets | ❌ rustup could not install them |'
+
+  # A missing toolchain named by the input alone fails the same way,
+  # without naming the lists, which requested nothing.
+  setup
+  export INPUT_TOOLCHAIN=1.90.0 MOCK_MISSING=1.90.0 MOCK_INSTALL_FAIL=true
+  run_action
+  [ "$status" -eq 1 ]
+  [ "$(grep '^::error::' <<< "$output")" \
+    = '::error::rustup could not install toolchain 1.90.0' ]
+  [ ! -s "$MOCK_CALLS" ]
+  summary | grep -qF '### ❌ Failed at Install toolchain'
+  run ! grep -q 'Components and targets' "$GITHUB_STEP_SUMMARY"
+}
+
+@test "a path toolchain ignores components and targets with a warning" {
+  export MOCK_TOOLCHAIN="/opt/rust tool"
+  export INPUT_TOOLCHAIN_COMPONENTS=clippy INPUT_TOOLCHAIN_TARGETS=wasm32-wasip1
+  run_action
+
+  [ "$status" -eq 0 ]
+  [ -z "$(install_calls)" ]
+  [[ "$output" == *"::warning::toolchain_components and toolchain_targets are ignored for a path toolchain; install them into that toolchain instead"* ]]
+  summary | grep -qF '| Components and targets | ⚠️ Ignored for a path toolchain |'
+}
+
+@test "components or targets without rustup fail, naming the inputs" {
+  local input
+  for input in TOOLCHAIN_COMPONENTS TOOLCHAIN_TARGETS; do
+    setup
+    rm "$workdir/bin/rustup"
+    export "INPUT_$input=clippy"
+    run_action
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"::error::toolchain_components and toolchain_targets need rustup on PATH"* ]]
+    [ ! -s "$MOCK_CALLS" ]
+    [ "$(output_value toolchain_kind)" = none ]
+    summary | grep -qF '| Components and targets | ❌ Needs rustup |'
+  done
+}
+
+@test "rejects invalid component and target names without echoing them" {
+  local input message value
+  for input in TOOLCHAIN_COMPONENTS TOOLCHAIN_TARGETS; do
+    case "$input" in
+      TOOLCHAIN_COMPONENTS)
+        message="toolchain_components must list rustup component names" ;;
+      TOOLCHAIN_TARGETS)
+        message="toolchain_targets must list target triples" ;;
+    esac
+    for value in $'clippy\n::error::forged' '-clippy' '.hidden' '_x' \
+      'clippy;evil' 'a/b' 'x+y' 'cé' $'ok\r::error::forged'; do
+      setup
+      export "INPUT_$input=$value"
+      run_action
+      [ "$status" -eq 1 ]
+      [[ "$output" == *"::error::$message"* ]]
+      [[ "$output" != *"forged"* ]]
+      [ ! -s "$MOCK_RUSTUP_LOG" ]
+      [ ! -s "$MOCK_CALLS" ]
+      # prepare.sh checks the same inputs.
+      run_prepare
+      [ "$status" -eq 1 ]
+      [[ "$output" == *"::error::$message"* ]]
+    done
+  done
+}
+
+@test "accepts the characters rustup names use" {
+  export INPUT_TOOLCHAIN_COMPONENTS='rustc-codegen-cranelift-preview 0llvm.tools_x'
+  export INPUT_TOOLCHAIN_TARGETS='x86_64-unknown-linux-gnu.v2 wasm32-wasip1'
+  run_action
+
+  [ "$status" -eq 0 ]
+  [[ "$(install_calls)" == *'<--component><rustc-codegen-cranelift-preview,0llvm.tools_x><--target><x86_64-unknown-linux-gnu.v2,wasm32-wasip1>' ]]
+}
+
+@test "withholds credentials and runner command files from the install" {
+  local request
+  # With a list, the install alone; without, the probe and the install.
+  for request in 1:INPUT_TOOLCHAIN_COMPONENTS=clippy 2:MOCK_MISSING=1.90.0; do
+    setup
+    export CARGO_REGISTRY_TOKEN=secret-a CARGO_REGISTRIES_CRATES_IO_TOKEN=secret-b
+    export CARGO_REGISTRIES_PRIVATE_TOKEN=secret-e
+    export CARGO_REGISTRIES_PRIVATE_INDEX=sparse+https://index.example/
+    export ACTIONS_ID_TOKEN_REQUEST_TOKEN=secret-c
+    export ACTIONS_ID_TOKEN_REQUEST_URL=https://token.example
+    export ACTIONS_RUNTIME_TOKEN=secret-d
+    export GITHUB_ENV="$workdir/command-env" GITHUB_PATH="$workdir/command-path"
+    export GITHUB_STATE="$workdir/command-state"
+    export INPUT_TOOLCHAIN=1.90.0 "${request#*:}"
+    run_action
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -c '^rustup ' "$MOCK_CRED_LOG")" -eq "${request%%:*}" ]
+    [ "$(grep '^rustup ' "$MOCK_CRED_LOG" | cut -d'|' -f2- | sort -u)" \
+      = "$(printf 'unset|%.0s' {1..11})sparse+https://index.example/" ]
+  done
 }
 
 ### Credentials ###
@@ -1721,7 +1922,7 @@ EOF
     /^[a-z]/ { on = 0 }
     on && /^  [a-z_]+:$/ { sub(/:$/, ""); sub(/^  /, ""); print }
   ' "$action")
-  [ "${#names[@]}" -eq 23 ]
+  [ "${#names[@]}" -eq 25 ]
   for name in "${names[@]}"; do
     upper="$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')"
     [ "$(grep -cF "INPUT_$upper: \${{ inputs.$name }}" "$action")" -eq 2 ]

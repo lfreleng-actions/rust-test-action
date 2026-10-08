@@ -66,31 +66,33 @@ in one workflow run conflict, and the second fails.
 
 <!-- markdownlint-disable MD013 -->
 
-| Name                | Required | Default             | Description                                                                             |
-| ------------------- | -------- | ------------------- | --------------------------------------------------------------------------------------- |
-| path_prefix         | False    | `.`                 | Directory holding the project; must resolve inside the workspace                        |
-| manifest_path       | False    | `Cargo.toml`        | Path to `Cargo.toml`, relative to `path_prefix`; must not be a symlink                  |
-| workspace           | False    | `true`              | Test every workspace member (`--workspace`); a non-empty `packages` replaces it         |
-| packages            | False    |                     | Whitespace-separated packages to test (`-p`)                                            |
-| exclude             | False    |                     | Whitespace-separated packages to leave out; needs `workspace` and no `packages`         |
-| features            | False    |                     | Features to enable, separated by whitespace or commas                                   |
-| all_features        | False    | `false`             | Enable every feature (`--all-features`)                                                 |
-| no_default_features | False    | `false`             | Disable the default features (`--no-default-features`)                                  |
-| toolchain           | False    |                     | rustup toolchain to use; empty uses the one rustup selects for the project              |
-| lockfile_required   | False    | `false`             | Fail when `Cargo.lock` is missing, rather than generating one with a warning            |
-| setup_script        | False    |                     | Script, relative to `path_prefix`, run with bash from `path_prefix` before testing      |
-| test_runner         | False    | `cargo`             | `cargo` (`cargo test`) or `nextest` (`cargo nextest run`)                               |
-| nextest_version     | False    | `0.9.146`           | cargo-nextest version to install for the `nextest` runner                               |
-| test_args           | False    |                     | Extra runner arguments, split on spaces and tabs, never run through a shell             |
-| doc_tests           | False    | `true`              | Run doc tests                                                                           |
-| coverage            | False    | `false`             | Run the tests under cargo-llvm-cov and write lcov and Cobertura reports                 |
-| llvm_cov_version    | False    | `0.9.1`             | cargo-llvm-cov version to install for `coverage`                                        |
-| junit               | False    |                     | Write JUnit XML (`true`/`false`); empty means `true` for `nextest`, `false` for `cargo` |
-| artefact_upload     | False    | `true`              | Upload the JUnit and coverage reports as a workflow artefact                            |
-| artefact_name       | False    | `rust-test-results` | Name of the report artefact; give each matrix leg its own                               |
-| artefact_path       | False    |                     | Report directory, relative to `path_prefix`; see [Reports](#reports)                    |
-| permit_fail         | False    | `false`             | Report success with a warning when tests fail; see [Notes](#notes) for the scope        |
-| summary             | False    | `true`              | Write a results table to the job summary                                                |
+| Name                 | Required | Default             | Description                                                                             |
+| -------------------- | -------- | ------------------- | --------------------------------------------------------------------------------------- |
+| path_prefix          | False    | `.`                 | Directory holding the project; must resolve inside the workspace                        |
+| manifest_path        | False    | `Cargo.toml`        | Path to `Cargo.toml`, relative to `path_prefix`; must not be a symlink                  |
+| workspace            | False    | `true`              | Test every workspace member (`--workspace`); a non-empty `packages` replaces it         |
+| packages             | False    |                     | Whitespace-separated packages to test (`-p`)                                            |
+| exclude              | False    |                     | Whitespace-separated packages to leave out; needs `workspace` and no `packages`         |
+| features             | False    |                     | Features to enable, separated by whitespace or commas                                   |
+| all_features         | False    | `false`             | Enable every feature (`--all-features`)                                                 |
+| no_default_features  | False    | `false`             | Disable the default features (`--no-default-features`)                                  |
+| toolchain            | False    |                     | rustup toolchain to use; empty uses the one rustup selects for the project              |
+| toolchain_components | False    |                     | rustup components to install into the toolchain, separated by whitespace or commas      |
+| toolchain_targets    | False    |                     | Target triples to install into the toolchain, separated by whitespace or commas         |
+| lockfile_required    | False    | `false`             | Fail when `Cargo.lock` is missing, rather than generating one with a warning            |
+| setup_script         | False    |                     | Script, relative to `path_prefix`, run with bash from `path_prefix` before testing      |
+| test_runner          | False    | `cargo`             | `cargo` (`cargo test`) or `nextest` (`cargo nextest run`)                               |
+| nextest_version      | False    | `0.9.146`           | cargo-nextest version to install for the `nextest` runner                               |
+| test_args            | False    |                     | Extra runner arguments, split on spaces and tabs, never run through a shell             |
+| doc_tests            | False    | `true`              | Run doc tests                                                                           |
+| coverage             | False    | `false`             | Run the tests under cargo-llvm-cov and write lcov and Cobertura reports                 |
+| llvm_cov_version     | False    | `0.9.1`             | cargo-llvm-cov version to install for `coverage`                                        |
+| junit                | False    |                     | Write JUnit XML (`true`/`false`); empty means `true` for `nextest`, `false` for `cargo` |
+| artefact_upload      | False    | `true`              | Upload the JUnit and coverage reports as a workflow artefact                            |
+| artefact_name        | False    | `rust-test-results` | Name of the report artefact; give each matrix leg its own                               |
+| artefact_path        | False    |                     | Report directory, relative to `path_prefix`; see [Reports](#reports)                    |
+| permit_fail          | False    | `false`             | Report success with a warning when tests fail; see [Notes](#notes) for the scope        |
+| summary              | False    | `true`              | Write a results table to the job summary                                                |
 
 <!-- markdownlint-enable MD013 -->
 
@@ -133,43 +135,93 @@ step then runs these stages:
    warning. Without rustup, the action uses the `cargo` on `PATH` and
    reports `toolchain_kind` as `none`. A `RUSTUP_TOOLCHAIN` in the
    job environment outranks `rust-toolchain.toml`, as in rustup; the
-   action reports and uses that toolchain. The action then reads the
+   action reports and uses that toolchain.
+2. **Install toolchain.** Installs a missing channel toolchain named
+   by `toolchain`, and the `toolchain_components` and
+   `toolchain_targets` for any channel; see
+   [Toolchain components and targets](#toolchain-components-and-targets).
+   The action then reads the
    Cargo and rustc versions, and fails when either `--version` command
    fails or prints something other than a Rust release number.
-2. **Run setup script.** Runs `setup_script` with bash from
+3. **Run setup script.** Runs `setup_script` with bash from
    `path_prefix`, for example to install the native libraries that
    `-sys` crates need.
-3. **Check lockfile.** Without `Cargo.lock` beside the workspace root,
+4. **Check lockfile.** Without `Cargo.lock` beside the workspace root,
    the action fails when `lockfile_required` is `true`. Otherwise it
    runs `cargo generate-lockfile` and warns. Every later Cargo command
    runs with `--locked`.
-4. **Prepare coverage.** Adds the `llvm-tools-preview` component to a
+5. **Prepare coverage.** Adds the `llvm-tools-preview` component to a
    channel toolchain, clears old profiling data, and lists the
    packages the selection inputs pick with `cargo tree`.
-5. **Prepare reports.** Creates the report directory, after the setup
+6. **Prepare reports.** Creates the report directory, after the setup
    script has run, and checks a set `artefact_path` again.
-6. **Run tests.** Runs `cargo test`, `cargo nextest run`,
+7. **Run tests.** Runs `cargo test`, `cargo nextest run`,
    `cargo llvm-cov test` or `cargo llvm-cov nextest`, with the
    selection inputs and then `test_args`.
-7. **Run doc tests.** nextest cannot run doc tests and cargo-llvm-cov
+8. **Run doc tests.** nextest cannot run doc tests and cargo-llvm-cov
    leaves them out on stable Rust, so those runs get a separate,
    uninstrumented `cargo test --doc`. A selection without a library
    target has no doc tests, and the action skips them. A plain
    `cargo test` run includes its doc tests last and stops at the first
    failing test binary, so when it fails the summary reports the doc
    tests as unknown.
-8. **Write coverage reports.** Writes `lcov.info` and `cobertura.xml`
-   for the packages listed in stage 4, naming each with `-p`, since
+9. **Write coverage reports.** Writes `lcov.info` and `cobertura.xml`
+   for the packages listed in stage 5, naming each with `-p`, since
    `cargo llvm-cov report` accepts neither `exclude` nor the feature
    inputs. It computes `coverage_percent` as the lines hit over the
    lines found in the lcov report.
-9. **Collect JUnit report.** For nextest, checks that `junit.xml`
+10. **Collect JUnit report.** For nextest, checks that `junit.xml`
    exists.
 
 A failing test or doc test run does not stop the later stages, so the
 reports describe the failure, and the upload step still runs. Any
 other failure stops the action. The job summary shows the outcome, a
 table of the stages, the report sizes, and any warnings.
+
+### Toolchain components and targets
+
+A `toolchain` input overrides `rust-toolchain.toml`, so rustup no
+longer installs the `components` and `targets` that file lists. Pass
+them through `toolchain_components` and `toolchain_targets` instead:
+
+```yaml
+- uses: lfreleng-actions/rust-test-action@<commit-sha>
+  with:
+    toolchain: "1.90.0"
+    toolchain_components: "clippy, rust-src"
+    toolchain_targets: "wasm32-unknown-unknown"
+```
+
+Names may contain `A-Z a-z 0-9 _ . -` and start with a letter or
+digit; whitespace, newlines and commas separate them. What the action
+does depends on `toolchain_kind`:
+
+- `channel`, with either list naming anything: the action runs one
+  `rustup toolchain install <toolchain> --profile minimal --no-self-update`
+  call, adding `--component` and `--target` with comma-separated
+  lists when they name anything. It installs a missing toolchain with
+  the minimal profile, or adds the components and targets to the
+  installed one. An exact version such as `1.90.0` keeps its version;
+  a moving channel such as `stable` updates to its newest release.
+- `channel`, with `toolchain` set and both lists empty: the action
+  installs that toolchain the same way when
+  `rustup which --toolchain <toolchain> rustc`, run with
+  `RUSTUP_AUTO_INSTALL=0`, finds it missing, and otherwise leaves the
+  installed one untouched. It does not rely on rustup's auto-install,
+  which installs the `default` profile and which
+  `RUSTUP_AUTO_INSTALL=0` turns off. A toolchain from
+  `rustup toolchain link` works here, though rustup cannot add
+  components or targets to one. A channel that the project selects,
+  with both lists empty, gets no rustup call at all.
+- `path`: the action ignores both inputs, with a warning.
+- `none`: the action fails when either input names anything.
+
+These are the rules
+[rust-build-action](https://github.com/lfreleng-actions/rust-build-action)
+follows, so a workflow can pass the same inputs to both. The job
+summary lists what the action installed. Coverage still adds
+`llvm-tools-preview` in its own `rustup component add` call, which
+never updates the toolchain.
 
 ### Security
 
